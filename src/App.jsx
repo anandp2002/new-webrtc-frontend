@@ -286,11 +286,10 @@ const App = () => {
 
   const addPeer = (userId, callerId, stream) => {
     console.log('Adding peer for user:', userId);
+
     const peer = new RTCPeerConnection({
       iceServers: [
         { urls: 'stun:' + STUN_TURN_SERVER },
-
-        // TURN servers configuration
         {
           urls: 'turn:' + STUN_TURN_SERVER,
           username: TURN_USERNAME,
@@ -321,7 +320,7 @@ const App = () => {
     };
 
     peer.ontrack = ({ streams }) => {
-      console.log('Received tracks from:', userId);
+      console.log('Received remote stream from:', userId);
       setRemoteVideos((prev) => {
         const exists = prev.find((v) => v.id === userId);
         if (exists) {
@@ -478,6 +477,7 @@ const App = () => {
                 <div className="relative">
                   <div className="overflow-hidden rounded-lg shadow-lg bg-black relative">
                     <video
+                      style={{ transform: 'scaleX(-1)' }}
                       ref={localVideoRef}
                       autoPlay
                       playsInline
@@ -612,6 +612,7 @@ const Video = ({ stream }) => {
   return (
     <div className="overflow-hidden rounded-lg shadow-lg bg-black relative">
       <video
+        style={{ transform: 'scaleX(-1)' }}
         ref={ref}
         autoPlay
         playsInline
