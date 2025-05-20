@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { io } from 'socket.io-client';
 import { v4 as uuidv4 } from 'uuid';
 import {
@@ -8,6 +8,7 @@ import {
   VideoOff,
   UserPlus,
   LogOut,
+  Copy,
 } from 'lucide-react';
 
 const App = () => {
@@ -16,34 +17,56 @@ const App = () => {
   const [joined, setJoined] = useState(false);
   const localVideoRef = useRef(null);
   const peersRef = useRef({});
-  const localStreamRef = useRef(null);
+  const localStreamRef = useRef(null); // This will hold the actual MediaStream object
   const [remoteVideos, setRemoteVideos] = useState([]);
   const [error, setError] = useState('');
-  const [localStream, setLocalStream] = useState(null);
+  const [localStream, setLocalStream] = useState(null); // This state will reflect the current local stream for rendering decisions
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
   const [roomUrl, setRoomUrl] = useState('');
   const [isCopied, setIsCopied] = useState(false);
+  const [isCreator, setIsCreator] = useState(false);
 
-  const BASE_URL = import.meta.env.VITE_BASE_URL;
-  const STUN_TURN_SERVER = import.meta.env.VITE_STUN_TURN_SERVER;
-  const TURN_USERNAME = import.meta.env.VITE_TURN_USERNAME;
-  const TURN_PASSWORD = import.meta.env.VITE_TURN_PASSWORD;
+  const BASE_URL = import.meta.env.VITE_BASE_URL || 'http://localhost:5000';
+  const STUN_TURN_SERVER =
+    import.meta.env.VITE_STUN_TURN_SERVER || 'stun.l.google.com:19302';
+  const TURN_USERNAME = import.meta.env.VITE_TURN_USERNAME || '';
+  const TURN_PASSWORD = import.meta.env.VITE_TURN_PASSWORD || '';
 
-  // Setup local video once joined and stream is available
-  useEffect(() => {
-    if (joined && localStreamRef.current && localVideoRef.current) {
-      console.log('Setting up local video element with stream');
-      localVideoRef.current.srcObject = localStreamRef.current;
+  // Utility function to get media stream
+  const getMediaStream = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
+      });
+      console.log('Got media stream:', stream);
+      localStreamRef.current = stream; // Update the ref with the actual stream
+      setLocalStream(stream); // Update the state to trigger re-render
+      return stream;
+    } catch (err) {
+      console.error('Error accessing media devices:', err);
+      setError(`Error accessing camera or microphone: ${err.message}`);
+      return null;
     }
-  }, [joined, localStream]);
+  }, []); // No dependencies for this one as it only gets user media
 
-  // Initialize socket and setup listeners only once
+  // Effect to handle setting the local video's srcObject when localStream changes
+  useEffect(() => {
+    if (localVideoRef.current && localStream) {
+      console.log('Attaching localStream to localVideoRef.current.srcObject');
+      localVideoRef.current.srcObject = localStream;
+    } else if (localVideoRef.current && !localStream) {
+      // If localStream becomes null, clear the srcObject
+      localVideoRef.current.srcObject = null;
+    }
+  }, [localStream]); // This effect runs whenever localStream state changes
+
+  // Initialize socket and setup listeners
   useEffect(() => {
     const newSocket = io(BASE_URL);
     setSocket(newSocket);
 
-    // Handle connection errors
     newSocket.on('connect_error', (err) => {
       console.error('Socket connection error:', err);
       setError(
@@ -56,13 +79,14 @@ const App = () => {
       setError('');
     });
 
+    // Cleanup function for socket connection
     return () => {
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((track) => track.stop());
       }
       newSocket.disconnect();
     };
-  }, []);
+  }, [BASE_URL]);
 
   // Setup socket event handlers once socket is set
   useEffect(() => {
@@ -71,6 +95,7 @@ const App = () => {
     const handleAllUsers = (users) => {
       console.log('Received all users:', users);
       users.forEach((userId) => {
+        // Pass localStreamRef.current (the actual MediaStream) to createPeer
         const peer = createPeer(userId, socket.id, localStreamRef.current);
         peersRef.current[userId] = peer;
       });
@@ -78,6 +103,8 @@ const App = () => {
 
     const handleUserJoined = (userId) => {
       console.log('User joined:', userId);
+      if (userId === socket.id) return;
+      // Pass localStreamRef.current (the actual MediaStream) to addPeer
       const peer = addPeer(userId, socket.id, localStreamRef.current);
       peersRef.current[userId] = peer;
     };
@@ -87,6 +114,9 @@ const App = () => {
       try {
         let peer = peersRef.current[caller];
         if (!peer) {
+          // If peer connection doesn't exist, create it.
+          // This can happen if a user joins an existing room and receives offers
+          // from users already there.
           peer = addPeer(caller, socket.id, localStreamRef.current);
           peersRef.current[caller] = peer;
         }
@@ -131,13 +161,26 @@ const App = () => {
       }
     };
 
+    const handleRoomNotFound = () => {
+      setError(
+        'This room does not exist. Please check the Room ID or create a new room.'
+      );
+      leaveRoom(); // Automatically leave UI if room not found
+    };
+
     socket.on('all-users', handleAllUsers);
     socket.on('user-joined', handleUserJoined);
     socket.on('offer', handleOffer);
     socket.on('answer', handleAnswer);
     socket.on('ice-candidate', handleIceCandidate);
     socket.on('user-disconnected', handleUserDisconnected);
+    socket.on('room-not-found', handleRoomNotFound);
+    socket.on('room-created', ({ roomId }) => {
+      console.log('Room successfully created acknowledgment:', roomId);
+      setIsCreator(true);
+    });
 
+    // Cleanup socket event handlers
     return () => {
       socket.off('all-users', handleAllUsers);
       socket.off('user-joined', handleUserJoined);
@@ -145,19 +188,23 @@ const App = () => {
       socket.off('answer', handleAnswer);
       socket.off('ice-candidate', handleIceCandidate);
       socket.off('user-disconnected', handleUserDisconnected);
+      socket.off('room-not-found', handleRoomNotFound);
+      socket.off('room-created');
     };
-  }, [socket]);
+  }, [socket]); // Dependencies here are just 'socket'
 
-  const createRoom = () => {
+  const createRoom = async () => {
+    if (!socket) return;
+    setError('');
     const newRoomId = uuidv4();
     setRoomId(newRoomId);
-    console.log('Created room with ID:', newRoomId);
+    console.log('Requesting to create room with ID:', newRoomId);
 
-    // Generate a shareable URL
     const url = `${window.location.origin}?room=${newRoomId}`;
     setRoomUrl(url);
 
-    // Optional: copy to clipboard for easy sharing
+    socket.emit('create-room', { roomId: newRoomId });
+
     navigator.clipboard
       .writeText(url)
       .then(() => {
@@ -174,36 +221,38 @@ const App = () => {
       return;
     }
 
-    try {
-      setError('');
-      console.log('Attempting to join room:', roomId);
+    setError('');
+    console.log('Attempting to join room:', roomId);
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true,
+    socket.emit('check-room', { roomId });
+
+    const roomExistsPromise = new Promise((resolve) => {
+      socket.once('room-exists', ({ exists }) => {
+        resolve(exists);
       });
+    });
 
-      console.log('Got media stream:', stream);
-      localStreamRef.current = stream;
-      setLocalStream(stream);
+    const roomExists = await roomExistsPromise;
 
-      // Wait for the next render cycle before setting srcObject
-      setTimeout(() => {
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = stream;
-          console.log('Set local video source:', stream.id);
-        } else {
-          console.warn('Local video ref is not available');
-        }
-      }, 0);
-
-      socket.emit('join-room', { roomId });
-      setJoined(true);
-      console.log('Successfully joined room:', roomId);
-    } catch (error) {
-      console.error('Error accessing media devices:', error);
-      setError(`Error accessing camera or microphone: ${error.message}`);
+    if (!roomExists) {
+      setError(
+        'This room does not exist. Please check the Room ID or create a new room.'
+      );
+      return;
     }
+
+    const stream = await getMediaStream(); // Get media stream
+    if (!stream) {
+      setError(
+        'Failed to get camera/microphone access. Please ensure permissions are granted.'
+      );
+      return;
+    }
+
+    // After successfully getting the stream, then join the room
+    socket.emit('join-room', { roomId });
+    setJoined(true);
+    console.log('Successfully joined room:', roomId);
   };
 
   // Check URL for room ID on component mount
@@ -217,23 +266,26 @@ const App = () => {
 
   const createPeer = (userId, callerId, stream) => {
     console.log('Creating peer for user:', userId);
-    const peer = new RTCPeerConnection({
-      iceServers: [
-        { urls: 'stun:' + STUN_TURN_SERVER },
+    const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
 
-        // TURN servers configuration
-        {
-          urls: 'turn:' + STUN_TURN_SERVER,
-          username: TURN_USERNAME,
-          credential: TURN_PASSWORD,
-        },
-      ],
+    if (TURN_USERNAME && TURN_PASSWORD && STUN_TURN_SERVER) {
+      iceServers.push({
+        urls: 'turn:' + STUN_TURN_SERVER,
+        username: TURN_USERNAME,
+        credential: TURN_PASSWORD,
+      });
+    }
+
+    const peer = new RTCPeerConnection({
+      iceServers,
     });
 
     if (stream) {
       stream.getTracks().forEach((track) => peer.addTrack(track, stream));
     } else {
-      console.warn('No local stream available when creating peer');
+      console.warn(
+        'No local stream available when creating peer for ' + userId
+      );
     }
 
     peer.onicecandidate = (event) => {
@@ -265,7 +317,6 @@ const App = () => {
       });
     };
 
-    // Create and send offer
     peer
       .createOffer()
       .then((offer) => peer.setLocalDescription(offer))
@@ -287,21 +338,24 @@ const App = () => {
   const addPeer = (userId, callerId, stream) => {
     console.log('Adding peer for user:', userId);
 
+    const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+
+    if (TURN_USERNAME && TURN_PASSWORD && STUN_TURN_SERVER) {
+      iceServers.push({
+        urls: 'turn:' + STUN_TURN_SERVER,
+        username: TURN_USERNAME,
+        credential: TURN_PASSWORD,
+      });
+    }
+
     const peer = new RTCPeerConnection({
-      iceServers: [
-        { urls: 'stun:' + STUN_TURN_SERVER },
-        {
-          urls: 'turn:' + STUN_TURN_SERVER,
-          username: TURN_USERNAME,
-          credential: TURN_PASSWORD,
-        },
-      ],
+      iceServers,
     });
 
     if (stream) {
       stream.getTracks().forEach((track) => peer.addTrack(track, stream));
     } else {
-      console.warn('No local stream available when adding peer');
+      console.warn('No local stream available when adding peer for ' + userId);
     }
 
     peer.onicecandidate = (event) => {
@@ -337,10 +391,11 @@ const App = () => {
   };
 
   const leaveRoom = () => {
+    // Stop all local tracks
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => track.stop());
       localStreamRef.current = null;
-      setLocalStream(null);
+      setLocalStream(null); // Clear local stream state to trigger useEffect and clear srcObject
     }
 
     // Close all peer connections
@@ -351,8 +406,16 @@ const App = () => {
     peersRef.current = {};
     setRemoteVideos([]);
     setJoined(false);
-
-    console.log('Left room:', roomId);
+    setIsCreator(false);
+    setRoomId(''); // Clear room ID
+    setRoomUrl(''); // Clear room URL
+    setError(''); // Clear any errors
+    // Optionally, disconnect the socket to ensure a clean state
+    if (socket) {
+      socket.disconnect();
+      setSocket(null); // Reset socket state
+    }
+    console.log('Left room.');
   };
 
   const toggleMute = () => {
@@ -419,9 +482,9 @@ const App = () => {
                   />
                   <button
                     onClick={copyRoomUrl}
-                    className="text-indigo-600 hover:text-indigo-800 text-sm font-medium"
+                    className="text-indigo-600 hover:text-indigo-800 text-sm font-medium flex items-center gap-1"
                   >
-                    {isCopied ? 'Copied!' : 'Copy'}
+                    <Copy size={16} /> {isCopied ? 'Copied!' : 'Copy'}
                   </button>
                 </div>
               )}
@@ -462,6 +525,9 @@ const App = () => {
                 <p className="text-sm text-gray-600">
                   Room ID:{' '}
                   <span className="font-medium text-indigo-600">{roomId}</span>
+                  {isCreator && (
+                    <span className="ml-2 text-green-500">(Creator)</span>
+                  )}
                 </p>
               </div>
               <button
@@ -472,22 +538,28 @@ const App = () => {
               </button>
             </div>
 
-            <div className="flex flex-wrap justify-center gap-4 mb-6">
+            <div className="flex flex-wrap justify-center gap-4 mb-16">
+              {/* Local Video */}
+              {/* Only render the video element if localStream exists */}
               {localStream && (
                 <div className="relative">
                   <div className="overflow-hidden rounded-lg shadow-lg bg-black relative">
                     <video
-                      style={{ transform: 'scaleX(-1)' }}
+                      style={{ transform: 'scaleX(-1)' }} // Mirror local video
                       ref={localVideoRef}
                       autoPlay
                       playsInline
-                      muted
+                      muted // Mute local video to prevent echo
                       width="320"
                       height="240"
-                      className={`${!isVideoEnabled ? 'invisible' : ''}`}
+                      className={`${!isVideoEnabled ? 'visible' : ''}`} // Ensure visibility
                     />
+                    {/* Overlay for when video is disabled */}
                     {!isVideoEnabled && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-gray-800 text-white">
+                      <div
+                        className="absolute inset-0 flex items-center justify-center bg-gray-800 text-white"
+                        style={{ width: '320px', height: '240px' }}
+                      >
                         <div className="text-center">
                           <div className="w-16 h-16 bg-indigo-600 rounded-full flex items-center justify-center mx-auto mb-2">
                             <span className="text-xl font-bold">You</span>
@@ -503,6 +575,7 @@ const App = () => {
                 </div>
               )}
 
+              {/* Remote Videos */}
               {remoteVideos.map(({ id, stream }) => (
                 <div key={id} className="relative">
                   <Video stream={stream} />
@@ -531,7 +604,7 @@ const App = () => {
                     }}
                     className="mt-4 text-indigo-600 hover:text-indigo-800 text-sm font-medium flex items-center gap-1"
                   >
-                    {isCopied ? 'Copied!' : 'Copy Room ID'}
+                    <Copy size={16} /> {isCopied ? 'Copied!' : 'Copy Room ID'}
                   </button>
                 </div>
               )}
@@ -585,34 +658,35 @@ const Video = ({ stream }) => {
 
   useEffect(() => {
     if (ref.current && stream) {
-      console.log('Setting remote video stream');
+      console.log('Setting video stream for remote user');
       ref.current.srcObject = stream;
 
-      // Check if the video track is enabled
       const videoTrack = stream.getVideoTracks()[0];
       if (videoTrack) {
         setVideoActive(videoTrack.enabled);
 
-        // Listen for enabled/disabled changes
-        const trackListener = () => {
-          setVideoActive(videoTrack.enabled);
-        };
+        const onTrackMute = () => setVideoActive(false);
+        const onTrackUnmute = () => setVideoActive(true);
 
-        videoTrack.addEventListener('mute', () => setVideoActive(false));
-        videoTrack.addEventListener('unmute', () => setVideoActive(true));
+        videoTrack.addEventListener('mute', onTrackMute);
+        videoTrack.addEventListener('unmute', onTrackUnmute);
 
         return () => {
-          videoTrack.removeEventListener('mute', trackListener);
-          videoTrack.removeEventListener('unmute', trackListener);
+          videoTrack.removeEventListener('mute', onTrackMute);
+          videoTrack.removeEventListener('unmute', onTrackUnmute);
         };
+      } else {
+        setVideoActive(false); // No video track in stream
       }
+    } else if (ref.current && !stream) {
+      ref.current.srcObject = null; // Clear srcObject if stream becomes null
     }
   }, [stream]);
 
   return (
     <div className="overflow-hidden rounded-lg shadow-lg bg-black relative">
       <video
-        style={{ transform: 'scaleX(-1)' }}
+        style={{ transform: 'scaleX(-1)' }} // Mirror remote video if desired, though often not for others
         ref={ref}
         autoPlay
         playsInline
@@ -621,7 +695,10 @@ const Video = ({ stream }) => {
         className={`${!videoActive ? 'invisible' : ''}`}
       />
       {!videoActive && (
-        <div className="absolute inset-0 flex items-center justify-center bg-gray-800 text-white">
+        <div
+          className="absolute inset-0 flex items-center justify-center bg-gray-800 text-white"
+          style={{ width: '320px', height: '240px' }}
+        >
           <div className="text-center">
             <div className="w-16 h-16 bg-indigo-600 rounded-full flex items-center justify-center mx-auto mb-2">
               <span className="text-xl font-bold">User</span>
