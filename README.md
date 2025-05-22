@@ -2,7 +2,7 @@
 
 # Steps to install
 1. git clone https://github.com/anandp2002/WEBRTC-frontend.git
-2. cd WEBRTC-server
+2. cd WEBRTC-frontend
 3. npm install
 4. create a .env file and set environment variables  
     VITE_BASE_URL = http://localhost:5000 (or your backend url)  
