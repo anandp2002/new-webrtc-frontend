@@ -1,6 +1,5 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { io } from 'socket.io-client';
-import { v4 as uuidv4 } from 'uuid';
 import {
   Mic,
   MicOff,
@@ -196,14 +195,19 @@ const App = () => {
   const createRoom = async () => {
     if (!socket) return;
     setError('');
-    const newRoomId = uuidv4();
-    setRoomId(newRoomId);
+    const newRoomId = Math.floor(100000 + Math.random() * 900000).toString(); // 6 digit room ID
+
+    setRoomId(newRoomId); // Set the room ID first
     console.log('Requesting to create room with ID:', newRoomId);
 
     const url = `${window.location.origin}?room=${newRoomId}`;
     setRoomUrl(url);
 
     socket.emit('create-room', { roomId: newRoomId });
+
+    // Call joinRoom directly after setting the roomId
+    // This will now use the newly set roomId and get the media stream
+    await joinRoom(newRoomId); // Pass the newRoomId directly to ensure it's used
 
     navigator.clipboard
       .writeText(url)
@@ -215,16 +219,17 @@ const App = () => {
       .catch((err) => console.error('Could not copy room URL:', err));
   };
 
-  const joinRoom = async () => {
-    if (!roomId || !socket) {
+  const joinRoom = async (idToJoin = roomId) => {
+    // Modified to accept an ID or use existing roomId
+    if (!idToJoin || !socket) {
       setError('Please enter a Room ID');
       return;
     }
 
     setError('');
-    console.log('Attempting to join room:', roomId);
+    console.log('Attempting to join room:', idToJoin);
 
-    socket.emit('check-room', { roomId });
+    socket.emit('check-room', { roomId: idToJoin });
 
     const roomExistsPromise = new Promise((resolve) => {
       socket.once('room-exists', ({ exists }) => {
@@ -250,9 +255,9 @@ const App = () => {
     }
 
     // After successfully getting the stream, then join the room
-    socket.emit('join-room', { roomId });
+    socket.emit('join-room', { roomId: idToJoin });
     setJoined(true);
-    console.log('Successfully joined room:', roomId);
+    console.log('Successfully joined room:', idToJoin);
   };
 
   // Check URL for room ID on component mount
@@ -503,7 +508,7 @@ const App = () => {
                 className="border border-gray-300 rounded-lg px-4 py-3 w-full focus:outline-none focus:ring-2 focus:ring-indigo-500 transition"
               />
               <button
-                onClick={joinRoom}
+                onClick={() => joinRoom()} // Call joinRoom without arguments to use the state roomId
                 disabled={!roomId}
                 className={`${
                   roomId
