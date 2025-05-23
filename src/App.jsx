@@ -8,6 +8,7 @@ import {
   UserPlus,
   LogOut,
   Copy,
+  Users,
 } from 'lucide-react';
 
 const App = () => {
@@ -15,16 +16,19 @@ const App = () => {
   const [roomId, setRoomId] = useState('');
   const [joined, setJoined] = useState(false);
   const localVideoRef = useRef(null);
+  const localBackgroundVideoRef = useRef(null); // Keeping declaration as it was present
   const peersRef = useRef({});
   const localStreamRef = useRef(null); // This will hold the actual MediaStream object
+  // remoteVideos now includes a 'videoActive' property
   const [remoteVideos, setRemoteVideos] = useState([]);
   const [error, setError] = useState('');
-  const [localStream, setLocalStream] = useState(null); // This state will reflect the current local stream for rendering decisions
+  const [localStream, setLocalStream] = useState(null);
   const [isMuted, setIsMuted] = useState(false);
-  const [isVideoEnabled, setIsVideoEnabled] = useState(true);
+  const [isVideoEnabled, setIsVideoEnabled] = useState(true); // Tracks local user's video state
   const [roomUrl, setRoomUrl] = useState('');
   const [isCopied, setIsCopied] = useState(false);
   const [isCreator, setIsCreator] = useState(false);
+  const [participantCount, setParticipantCount] = useState(1);
 
   const BASE_URL = import.meta.env.VITE_BASE_URL || 'http://localhost:5000';
   const STUN_TURN_SERVER =
@@ -32,7 +36,6 @@ const App = () => {
   const TURN_USERNAME = import.meta.env.VITE_TURN_USERNAME || '';
   const TURN_PASSWORD = import.meta.env.VITE_TURN_PASSWORD || '';
 
-  // Utility function to get media stream
   const getMediaStream = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -40,28 +43,31 @@ const App = () => {
         audio: true,
       });
       console.log('Got media stream:', stream);
-      localStreamRef.current = stream; // Update the ref with the actual stream
-      setLocalStream(stream); // Update the state to trigger re-render
+      localStreamRef.current = stream;
+      setLocalStream(stream);
+      // Initialize local video state based on stream tracks
+      setIsVideoEnabled(
+        stream.getVideoTracks().length > 0 && stream.getVideoTracks()[0].enabled
+      );
+      setIsMuted(
+        stream.getAudioTracks().length > 0 &&
+          !stream.getAudioTracks()[0].enabled
+      );
+
       return stream;
     } catch (err) {
       console.error('Error accessing media devices:', err);
       setError(`Error accessing camera or microphone: ${err.message}`);
       return null;
     }
-  }, []); // No dependencies for this one as it only gets user media
+  }, []);
 
-  // Effect to handle setting the local video's srcObject when localStream changes
   useEffect(() => {
     if (localVideoRef.current && localStream) {
-      console.log('Attaching localStream to localVideoRef.current.srcObject');
       localVideoRef.current.srcObject = localStream;
-    } else if (localVideoRef.current && !localStream) {
-      // If localStream becomes null, clear the srcObject
-      localVideoRef.current.srcObject = null;
     }
-  }, [localStream]); // This effect runs whenever localStream state changes
+  }, [localStream]);
 
-  // Initialize socket and setup listeners
   useEffect(() => {
     const newSocket = io(BASE_URL);
     setSocket(newSocket);
@@ -78,7 +84,6 @@ const App = () => {
       setError('');
     });
 
-    // Cleanup function for socket connection
     return () => {
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((track) => track.stop());
@@ -87,23 +92,49 @@ const App = () => {
     };
   }, [BASE_URL]);
 
-  // Setup socket event handlers once socket is set
   useEffect(() => {
     if (!socket) return;
 
     const handleAllUsers = (users) => {
       console.log('Received all users:', users);
+      setParticipantCount(users.length + 1);
       users.forEach((userId) => {
-        // Pass localStreamRef.current (the actual MediaStream) to createPeer
         const peer = createPeer(userId, socket.id, localStreamRef.current);
         peersRef.current[userId] = peer;
+      });
+    };
+
+    // NEW: Handle initial video states when joining a room
+    const handleInitialVideoStates = (videoStates) => {
+      console.log('Received initial video states:', videoStates);
+      setRemoteVideos((prevRemoteVideos) => {
+        return prevRemoteVideos
+          .map((video) => {
+            // If a remote video already exists, update its videoActive status
+            if (Object.prototype.hasOwnProperty.call(videoStates, video.id)) {
+              return { ...video, videoActive: videoStates[video.id] };
+            }
+
+            return video;
+          })
+          .concat(
+            Object.keys(videoStates) // Add new entries for users whose streams haven't arrived yet
+              .filter(
+                (userId) => !prevRemoteVideos.some((v) => v.id === userId)
+              )
+              .map((userId) => ({
+                id: userId,
+                stream: null, // Stream will be added later by ontrack
+                videoActive: videoStates[userId],
+              }))
+          );
       });
     };
 
     const handleUserJoined = (userId) => {
       console.log('User joined:', userId);
       if (userId === socket.id) return;
-      // Pass localStreamRef.current (the actual MediaStream) to addPeer
+      setParticipantCount((prev) => prev + 1);
       const peer = addPeer(userId, socket.id, localStreamRef.current);
       peersRef.current[userId] = peer;
     };
@@ -113,9 +144,6 @@ const App = () => {
       try {
         let peer = peersRef.current[caller];
         if (!peer) {
-          // If peer connection doesn't exist, create it.
-          // This can happen if a user joins an existing room and receives offers
-          // from users already there.
           peer = addPeer(caller, socket.id, localStreamRef.current);
           peersRef.current[caller] = peer;
         }
@@ -151,12 +179,25 @@ const App = () => {
       }
     };
 
+    // NEW: Handle remote video state changes
+    const handleRemoteVideoStateChange = ({ userId, videoEnabled }) => {
+      console.log(
+        `Remote user ${userId} video state changed to: ${videoEnabled}`
+      );
+      setRemoteVideos((prev) =>
+        prev.map((v) =>
+          v.id === userId ? { ...v, videoActive: videoEnabled } : v
+        )
+      );
+    };
+
     const handleUserDisconnected = (userId) => {
       console.log('User disconnected:', userId);
       if (peersRef.current[userId]) {
         peersRef.current[userId].close();
         delete peersRef.current[userId];
         setRemoteVideos((prev) => prev.filter((v) => v.id !== userId));
+        setParticipantCount((prev) => Math.max(1, prev - 1));
       }
     };
 
@@ -164,14 +205,16 @@ const App = () => {
       setError(
         'This room does not exist. Please check the Room ID or create a new room.'
       );
-      leaveRoom(); // Automatically leave UI if room not found
+      leaveRoom();
     };
 
     socket.on('all-users', handleAllUsers);
+    socket.on('initial-video-states', handleInitialVideoStates); // NEW
     socket.on('user-joined', handleUserJoined);
     socket.on('offer', handleOffer);
     socket.on('answer', handleAnswer);
     socket.on('ice-candidate', handleIceCandidate);
+    socket.on('remoteVideoStateChange', handleRemoteVideoStateChange); // NEW
     socket.on('user-disconnected', handleUserDisconnected);
     socket.on('room-not-found', handleRoomNotFound);
     socket.on('room-created', ({ roomId }) => {
@@ -179,25 +222,26 @@ const App = () => {
       setIsCreator(true);
     });
 
-    // Cleanup socket event handlers
     return () => {
       socket.off('all-users', handleAllUsers);
+      socket.off('initial-video-states', handleInitialVideoStates); // NEW
       socket.off('user-joined', handleUserJoined);
       socket.off('offer', handleOffer);
       socket.off('answer', handleAnswer);
       socket.off('ice-candidate', handleIceCandidate);
+      socket.off('remoteVideoStateChange', handleRemoteVideoStateChange); // NEW
       socket.off('user-disconnected', handleUserDisconnected);
       socket.off('room-not-found', handleRoomNotFound);
       socket.off('room-created');
     };
-  }, [socket]); // Dependencies here are just 'socket'
+  }, [socket]);
 
   const createRoom = async () => {
     if (!socket) return;
     setError('');
-    const newRoomId = Math.floor(100000 + Math.random() * 900000).toString(); // 6 digit room ID
+    const newRoomId = Math.floor(100000 + Math.random() * 900000).toString();
 
-    setRoomId(newRoomId); // Set the room ID first
+    setRoomId(newRoomId);
     console.log('Requesting to create room with ID:', newRoomId);
 
     const url = `${window.location.origin}?room=${newRoomId}`;
@@ -205,9 +249,7 @@ const App = () => {
 
     socket.emit('create-room', { roomId: newRoomId });
 
-    // Call joinRoom directly after setting the roomId
-    // This will now use the newly set roomId and get the media stream
-    await joinRoom(newRoomId); // Pass the newRoomId directly to ensure it's used
+    await joinRoom(newRoomId);
 
     navigator.clipboard
       .writeText(url)
@@ -220,7 +262,6 @@ const App = () => {
   };
 
   const joinRoom = async (idToJoin = roomId) => {
-    // Modified to accept an ID or use existing roomId
     if (!idToJoin || !socket) {
       setError('Please enter a Room ID');
       return;
@@ -246,7 +287,7 @@ const App = () => {
       return;
     }
 
-    const stream = await getMediaStream(); // Get media stream
+    const stream = await getMediaStream();
     if (!stream) {
       setError(
         'Failed to get camera/microphone access. Please ensure permissions are granted.'
@@ -254,13 +295,11 @@ const App = () => {
       return;
     }
 
-    // After successfully getting the stream, then join the room
     socket.emit('join-room', { roomId: idToJoin });
     setJoined(true);
     console.log('Successfully joined room:', idToJoin);
   };
 
-  // Check URL for room ID on component mount
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const roomFromUrl = params.get('room');
@@ -313,11 +352,23 @@ const App = () => {
       setRemoteVideos((prev) => {
         const exists = prev.find((v) => v.id === userId);
         if (exists) {
+          // If stream exists, update it. Keep existing videoActive status or set default if not present.
           return prev.map((v) =>
-            v.id === userId ? { id: userId, stream: streams[0] } : v
+            v.id === userId
+              ? {
+                  ...v,
+                  stream: streams[0],
+                  videoActive:
+                    v.videoActive !== undefined ? v.videoActive : true,
+                }
+              : v
           );
         } else {
-          return [...prev, { id: userId, stream: streams[0] }];
+          // Add new remote video with default videoActive as true (will be updated by initial-video-states)
+          return [
+            ...prev,
+            { id: userId, stream: streams[0], videoActive: true },
+          ];
         }
       });
     };
@@ -383,11 +434,23 @@ const App = () => {
       setRemoteVideos((prev) => {
         const exists = prev.find((v) => v.id === userId);
         if (exists) {
+          // If stream exists, update it. Keep existing videoActive status or set default if not present.
           return prev.map((v) =>
-            v.id === userId ? { id: userId, stream: streams[0] } : v
+            v.id === userId
+              ? {
+                  ...v,
+                  stream: streams[0],
+                  videoActive:
+                    v.videoActive !== undefined ? v.videoActive : true,
+                }
+              : v
           );
         } else {
-          return [...prev, { id: userId, stream: streams[0] }];
+          // Add new remote video with default videoActive as true (will be updated by initial-video-states or remoteVideoStateChange)
+          return [
+            ...prev,
+            { id: userId, stream: streams[0], videoActive: true },
+          ];
         }
       });
     };
@@ -396,14 +459,12 @@ const App = () => {
   };
 
   const leaveRoom = () => {
-    // Stop all local tracks
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => track.stop());
       localStreamRef.current = null;
-      setLocalStream(null); // Clear local stream state to trigger useEffect and clear srcObject
+      setLocalStream(null);
     }
 
-    // Close all peer connections
     Object.values(peersRef.current).forEach((peer) => {
       if (peer) peer.close();
     });
@@ -412,13 +473,14 @@ const App = () => {
     setRemoteVideos([]);
     setJoined(false);
     setIsCreator(false);
-    setRoomId(''); // Clear room ID
-    setRoomUrl(''); // Clear room URL
-    setError(''); // Clear any errors
-    // Optionally, disconnect the socket to ensure a clean state
+    setRoomId('');
+    setRoomUrl('');
+    setError('');
+    setParticipantCount(1); // Reset participant count
+
     if (socket) {
       socket.disconnect();
-      setSocket(null); // Reset socket state
+      setSocket(null);
     }
     console.log('Left room.');
   };
@@ -430,6 +492,8 @@ const App = () => {
         track.enabled = !track.enabled;
       });
       setIsMuted(!isMuted);
+      // No socket emission for mute/unmute if you only want to update local UI.
+      // If you want to show mute status for remote users, you'd emit a 'muteStateChange' event.
     }
   };
 
@@ -439,7 +503,13 @@ const App = () => {
       videoTracks.forEach((track) => {
         track.enabled = !track.enabled;
       });
-      setIsVideoEnabled(!isVideoEnabled);
+      const newVideoState = !isVideoEnabled;
+      setIsVideoEnabled(newVideoState);
+
+      // NEW: Emit video state change to the server
+      if (socket && joined) {
+        socket.emit('videoStateChange', { videoEnabled: newVideoState });
+      }
     }
   };
 
@@ -451,264 +521,237 @@ const App = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-900 to-gray-800 flex items-center justify-center px-4 py-10">
-      <div className="w-full max-w-6xl bg-white shadow-2xl rounded-xl p-6 backdrop-blur-sm bg-opacity-90">
-        {!joined ? (
-          <div className="flex flex-col items-center gap-6">
-            <h1 className="text-3xl font-bold text-indigo-900 mb-2">
-              Video Chat Room
-            </h1>
-            <p className="text-gray-600 text-center max-w-md">
-              Connect with others through secure, high-quality video calls.
-              Create a room or join with a room ID.
-            </p>
+    <div className="flex flex-col h-screen bg-gray-900 text-white font-sans">
+      {!joined ? (
+        <div className="flex-1 flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-gray-800 shadow-2xl rounded-xl p-6">
+            <div className="flex flex-col items-center gap-6">
+              <h1 className="text-3xl font-bold text-indigo-300 mb-2">
+                Video Chat Room
+              </h1>
+              <p className="text-gray-400 text-center max-w-md">
+                Connect with others through secure, high-quality video calls.
+                Create a room or join with a room ID.
+              </p>
 
-            {error && (
-              <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg relative w-full max-w-md">
-                {error}
-              </div>
-            )}
-
-            <div className="flex flex-col items-center gap-4 w-full max-w-md">
-              <button
-                onClick={createRoom}
-                className="bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white px-6 py-3 rounded-lg transition duration-300 w-full font-medium shadow-md flex items-center justify-center gap-2"
-              >
-                <UserPlus size={20} /> Create Room
-              </button>
-
-              {roomUrl && (
-                <div className="w-full bg-gray-100 p-3 rounded-lg flex items-center justify-between gap-2">
-                  <input
-                    type="text"
-                    value={roomUrl}
-                    readOnly
-                    className="bg-transparent flex-1 outline-none text-sm text-gray-700"
-                  />
-                  <button
-                    onClick={copyRoomUrl}
-                    className="text-indigo-600 hover:text-indigo-800 text-sm font-medium flex items-center gap-1"
-                  >
-                    <Copy size={16} /> {isCopied ? 'Copied!' : 'Copy'}
-                  </button>
+              {error && (
+                <div className="bg-red-900 border border-red-700 text-red-300 px-4 py-3 rounded-lg relative w-full max-w-md">
+                  {error}
                 </div>
               )}
 
-              <div className="flex items-center gap-2 w-full">
-                <hr className="flex-1 border-gray-300" />
-                <span className="text-gray-500">or</span>
-                <hr className="flex-1 border-gray-300" />
-              </div>
+              <div className="flex flex-col items-center gap-4 w-full max-w-md">
+                <button
+                  onClick={createRoom}
+                  className="bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white px-6 py-3 rounded-lg transition duration-300 w-full font-medium shadow-md flex items-center justify-center gap-2"
+                >
+                  <UserPlus size={20} /> Create Room
+                </button>
 
-              <input
-                type="text"
-                value={roomId}
-                onChange={(e) => setRoomId(e.target.value)}
-                placeholder="Enter Room ID"
-                className="border border-gray-300 rounded-lg px-4 py-3 w-full focus:outline-none focus:ring-2 focus:ring-indigo-500 transition"
-              />
-              <button
-                onClick={() => joinRoom()} // Call joinRoom without arguments to use the state roomId
-                disabled={!roomId}
-                className={`${
-                  roomId
-                    ? 'bg-indigo-600 hover:bg-indigo-700'
-                    : 'bg-gray-400 cursor-not-allowed'
-                } text-white px-6 py-3 rounded-lg transition duration-300 w-full font-medium shadow-md`}
-              >
-                Join Room
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div className="flex flex-col h-full">
-            <div className="flex justify-between items-center mb-6 pb-4 border-b border-gray-200">
-              <div>
-                <h2 className="text-xl font-bold text-indigo-900">
-                  Video Chat
-                </h2>
-                <p className="text-sm text-gray-600">
-                  Room ID:{' '}
-                  <span className="font-medium text-indigo-600">{roomId}</span>
-                  {isCreator && (
-                    <span className="ml-2 text-green-500">(Creator)</span>
-                  )}
-                </p>
-              </div>
-              <button
-                onClick={leaveRoom}
-                className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition duration-300 text-sm font-medium shadow flex items-center gap-1"
-              >
-                <LogOut size={16} /> Leave Room
-              </button>
-            </div>
-
-            <div className="flex flex-wrap justify-center gap-4 mb-16">
-              {/* Local Video */}
-              {/* Only render the video element if localStream exists */}
-              {localStream && (
-                <div className="relative">
-                  <div className="overflow-hidden rounded-lg shadow-lg bg-black relative">
-                    <video
-                      style={{ transform: 'scaleX(-1)' }} // Mirror local video
-                      ref={localVideoRef}
-                      autoPlay
-                      playsInline
-                      muted // Mute local video to prevent echo
-                      width="320"
-                      height="240"
-                      className={`${!isVideoEnabled ? 'visible' : ''}`} // Ensure visibility
+                {roomUrl && (
+                  <div className="w-full bg-gray-700 p-3 rounded-lg flex items-center justify-between gap-2">
+                    <input
+                      type="text"
+                      value={roomUrl}
+                      readOnly
+                      className="bg-transparent flex-1 outline-none text-sm text-gray-200"
                     />
-                    {/* Overlay for when video is disabled */}
-                    {!isVideoEnabled && (
-                      <div
-                        className="absolute inset-0 flex items-center justify-center bg-gray-800 text-white"
-                        style={{ width: '320px', height: '240px' }}
-                      >
-                        <div className="text-center">
-                          <div className="w-16 h-16 bg-indigo-600 rounded-full flex items-center justify-center mx-auto mb-2">
-                            <span className="text-xl font-bold">You</span>
-                          </div>
-                          <p>Camera Off</p>
-                        </div>
-                      </div>
-                    )}
+                    <button
+                      onClick={copyRoomUrl}
+                      className="text-indigo-400 hover:text-indigo-200 text-sm font-medium flex items-center gap-1"
+                    >
+                      <Copy size={16} /> {isCopied ? 'Copied!' : 'Copy'}
+                    </button>
                   </div>
-                  <p className="mt-2 text-center text-sm font-medium">
-                    You {socket && `(${socket.id?.substring(0, 6)}...)`}
-                  </p>
-                </div>
-              )}
+                )}
 
-              {/* Remote Videos */}
-              {remoteVideos.map(({ id, stream }) => (
-                <div key={id} className="relative">
-                  <Video stream={stream} />
-                  <p className="mt-2 text-center text-sm font-medium">
-                    {id.substring(0, 6)}...
-                  </p>
+                <div className="flex items-center gap-2 w-full">
+                  <hr className="flex-1 border-gray-600" />
+                  <span className="text-gray-500">or</span>
+                  <hr className="flex-1 border-gray-600" />
                 </div>
-              ))}
 
-              {joined && remoteVideos.length === 0 && (
-                <div className="flex flex-col items-center justify-center py-12 text-gray-500 w-full">
-                  <div className="w-20 h-20 rounded-full bg-indigo-100 flex items-center justify-center mb-4">
-                    <UserPlus size={32} className="text-indigo-600" />
-                  </div>
-                  <p className="text-lg font-medium text-indigo-900">
-                    Waiting for others to join...
-                  </p>
-                  <p className="text-sm text-gray-500 mt-2">
-                    Share your Room ID with others to invite them
-                  </p>
-                  <button
-                    onClick={() => {
-                      navigator.clipboard.writeText(roomId);
-                      setIsCopied(true);
-                      setTimeout(() => setIsCopied(false), 3000);
-                    }}
-                    className="mt-4 text-indigo-600 hover:text-indigo-800 text-sm font-medium flex items-center gap-1"
-                  >
-                    <Copy size={16} /> {isCopied ? 'Copied!' : 'Copy Room ID'}
-                  </button>
-                </div>
-              )}
+                <input
+                  type="text"
+                  value={roomId}
+                  onChange={(e) => setRoomId(e.target.value)}
+                  placeholder="Enter Room ID"
+                  className="border border-gray-600 rounded-lg px-4 py-3 w-full focus:outline-none focus:ring-2 focus:ring-indigo-500 transition bg-gray-700 text-white"
+                />
+                <button
+                  onClick={() => joinRoom()}
+                  disabled={!roomId}
+                  className={`${
+                    roomId
+                      ? 'bg-indigo-600 hover:bg-indigo-700'
+                      : 'bg-gray-500 cursor-not-allowed'
+                  } text-white px-6 py-3 rounded-lg transition duration-300 w-full font-medium shadow-md`}
+                >
+                  Join Room
+                </button>
+              </div>
             </div>
+          </div>
+        </div>
+      ) : (
+        <div className="relative flex-1 flex flex-col p-4 bg-gray-900 overflow-hidden">
+          <div className="flex-1 relative flex items-center justify-center rounded-lg overflow-hidden group bg-gray-800">
+            <div className="absolute inset-0 w-full h-full bg-gray-800 filter blur-lg scale-110"></div>
 
-            {joined && (
-              <div className="fixed bottom-0 left-0 right-0 bg-white bg-opacity-95 p-4 shadow-lg flex justify-center">
-                <div className="flex items-center gap-4">
-                  <button
-                    onClick={toggleMute}
-                    className={`p-3 rounded-full transition ${
-                      isMuted
-                        ? 'bg-red-100 text-red-600'
-                        : 'bg-gray-100 hover:bg-gray-200 text-gray-700'
-                    }`}
-                    title={isMuted ? 'Unmute' : 'Mute'}
-                  >
-                    {isMuted ? <MicOff size={24} /> : <Mic size={24} />}
-                  </button>
-
-                  <button
-                    onClick={toggleVideo}
-                    className={`p-3 rounded-full transition ${
-                      !isVideoEnabled
-                        ? 'bg-red-100 text-red-600'
-                        : 'bg-gray-100 hover:bg-gray-200 text-gray-700'
-                    }`}
-                    title={
-                      isVideoEnabled ? 'Turn off camera' : 'Turn on camera'
-                    }
-                  >
-                    {isVideoEnabled ? (
-                      <VideoIcon size={24} />
-                    ) : (
-                      <VideoOff size={24} />
-                    )}
-                  </button>
-                </div>
+            {remoteVideos.length > 0 ? (
+              remoteVideos.map(
+                (
+                  { id, stream, videoActive } // Pass videoActive prop
+                ) => (
+                  <div key={id} className="relative w-full h-full z-10">
+                    <Video
+                      stream={stream}
+                      userId={id}
+                      mirror={true}
+                      videoActive={videoActive}
+                    />
+                    <p className="absolute bottom-4 left-4 text-white text-base font-medium bg-black bg-opacity-50 px-3 py-1 rounded-md z-20">
+                      {id.substring(0, 6)}...
+                    </p>
+                  </div>
+                )
+              )
+            ) : (
+              <div className="relative flex items-center justify-center w-full h-full text-gray-500 text-2xl z-10">
+                Waiting for others to join...
               </div>
             )}
           </div>
-        )}
-      </div>
+
+          {localStream && (
+            <div
+              className="absolute bottom-4 right-4
+                          w-40 h-30
+                          md:w-60 md:h-40
+                          lg:w-72 lg:h-48
+                          rounded-lg overflow-hidden z-20 m-4"
+            >
+              <video
+                style={{ transform: 'scaleX(-1)' }}
+                ref={localVideoRef}
+                autoPlay
+                playsInline
+                muted
+                className={`relative w-full h-full object-cover z-10 transition-opacity duration-300 ${
+                  isVideoEnabled ? 'opacity-100' : 'opacity-0'
+                }`}
+              />
+
+              {!isVideoEnabled && (
+                <div className="absolute inset-0 flex items-center justify-center bg-gray-700 text-white z-20">
+                  <div className="text-center">
+                    <div className="w-16 h-16 bg-indigo-600 rounded-full flex items-center justify-center mx-auto mb-1">
+                      <span className="text-xl font-bold">
+                        {socket?.id?.substring(0, 1).toUpperCase() || 'Y'}
+                      </span>
+                    </div>
+                    <p className="text-sm">Camera Off</p>
+                  </div>
+                </div>
+              )}
+              <p className="absolute bottom-1 left-1 text-white text-xs font-medium bg-gray-800 bg-opacity-50 px-2 py-0.5 rounded-md z-20">
+                You
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {joined && (
+        <div className="mx-4 rounded-t-lg bg-gray-800 p-3 flex justify-center items-center z-30">
+          <div className="flex-1 flex items-center justify-start gap-2 pl-3 text-gray-300">
+            <p className="text-sm">
+              Room ID :{' '}
+              <span className="font-medium text-gray-300">{roomId}</span>
+            </p>
+          </div>
+
+          <div className="flex items-center gap-4">
+            <button
+              onClick={toggleMute}
+              className={`p-3 rounded-full transition-colors duration-200 ease-in-out ${
+                isMuted
+                  ? 'bg-red-500 text-white hover:bg-red-600'
+                  : 'bg-gray-700 hover:bg-gray-600 text-white'
+              }`}
+              title={isMuted ? 'Unmute' : 'Mute'}
+            >
+              {isMuted ? <MicOff size={24} /> : <Mic size={24} />}
+            </button>
+            <button
+              onClick={toggleVideo}
+              className={`p-3 rounded-full transition-colors duration-200 ease-in-out ${
+                !isVideoEnabled
+                  ? 'bg-red-500 text-white hover:bg-red-600'
+                  : 'bg-gray-700 hover:bg-gray-600 text-white'
+              }`}
+              title={isVideoEnabled ? 'Turn off camera' : 'Turn on camera'}
+            >
+              {isVideoEnabled ? (
+                <VideoIcon size={24} />
+              ) : (
+                <VideoOff size={24} />
+              )}
+            </button>
+            <button
+              onClick={leaveRoom}
+              className="bg-red-600 hover:bg-red-700 text-white px-5 py-2.5 rounded-full transition-colors duration-300 font-medium shadow-md flex items-center gap-1.5 text-sm"
+            >
+              <LogOut size={18} /> Leave
+            </button>
+          </div>
+
+          <div className="flex-1 flex items-center justify-end gap-2 pr-3 text-gray-300">
+            <Users size={24} />
+            <span className="text-lg font-medium">{participantCount}</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
 
-const Video = ({ stream }) => {
-  const ref = useRef(null);
-  const [videoActive, setVideoActive] = useState(true);
+// Modified Video component
+const Video = ({ stream, userId, mirror = false, videoActive }) => {
+  const videoRef = useRef(null);
 
   useEffect(() => {
-    if (ref.current && stream) {
-      console.log('Setting video stream for remote user');
-      ref.current.srcObject = stream;
-
-      const videoTrack = stream.getVideoTracks()[0];
-      if (videoTrack) {
-        setVideoActive(videoTrack.enabled);
-
-        const onTrackMute = () => setVideoActive(false);
-        const onTrackUnmute = () => setVideoActive(true);
-
-        videoTrack.addEventListener('mute', onTrackMute);
-        videoTrack.addEventListener('unmute', onTrackUnmute);
-
-        return () => {
-          videoTrack.removeEventListener('mute', onTrackMute);
-          videoTrack.removeEventListener('unmute', onTrackUnmute);
-        };
-      } else {
-        setVideoActive(false); // No video track in stream
-      }
-    } else if (ref.current && !stream) {
-      ref.current.srcObject = null; // Clear srcObject if stream becomes null
+    if (videoRef.current && stream) {
+      videoRef.current.srcObject = stream;
+    } else if (videoRef.current && !stream) {
+      // If stream is null, clear srcObject
+      videoRef.current.srcObject = null;
     }
-  }, [stream]);
+    // The videoActive prop now directly controls the display,
+    // so no need to listen for 'mute'/'unmute' on the track itself for this component.
+    // The parent (App) component now manages this state via signaling.
+  }, [stream, userId, videoActive]); // Added videoActive to dependencies
 
   return (
-    <div className="overflow-hidden rounded-lg shadow-lg bg-black relative">
+    <div className="relative w-full h-full overflow-hidden rounded-lg shadow-lg bg-black group">
       <video
-        style={{ transform: 'scaleX(-1)' }} // Mirror remote video if desired, though often not for others
-        ref={ref}
+        ref={videoRef}
         autoPlay
         playsInline
-        width="320"
-        height="240"
-        className={`${!videoActive ? 'invisible' : ''}`}
+        style={mirror ? { transform: 'scaleX(-1)' } : {}}
+        className={`relative w-full h-full object-contain z-10 transition-opacity duration-300 ${
+          videoActive ? 'opacity-100' : 'opacity-0'
+        }`}
       />
       {!videoActive && (
-        <div
-          className="absolute inset-0 flex items-center justify-center bg-gray-800 text-white"
-          style={{ width: '320px', height: '240px' }}
-        >
+        <div className="absolute inset-0 flex items-center justify-center bg-gray-800 text-white z-20">
           <div className="text-center">
-            <div className="w-16 h-16 bg-indigo-600 rounded-full flex items-center justify-center mx-auto mb-2">
-              <span className="text-xl font-bold">User</span>
+            <div className="w-12 h-12 bg-indigo-600 rounded-full flex items-center justify-center mx-auto mb-1">
+              <span className="text-lg font-bold">
+                {userId?.substring(0, 1).toUpperCase() || 'U'}
+              </span>
             </div>
-            <p>Camera Off</p>
+            <p className="text-sm">Camera Off</p>
           </div>
         </div>
       )}
