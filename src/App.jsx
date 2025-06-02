@@ -625,8 +625,10 @@ const App = () => {
   };
 
   // Determine local video position class dynamically
+  // When MIDI is shown, it's on the right of the remote video area, which is now half the screen.
+  // So, calc(50% + 1rem) pushes it beyond the left half to be within the right side of the left half.
   const localVideoPositionClass = showMidiVisualizer
-    ? 'top-4 right-4' // Top-right when MIDI visualizer is shown
+    ? 'top-4 right-4 md:right-[calc(50%+1rem)]' // Adjusted to be on the right side of the left half (remote videos)
     : 'bottom-4 right-4'; // Bottom-right when MIDI visualizer is hidden
 
   return (
@@ -705,9 +707,16 @@ const App = () => {
         </div>
       ) : (
         // Video chat room screen
-        <div className="relative flex-1 flex flex-col p-4 bg-gray-900 overflow-hidden">
-          {/* Main video area (remote videos) - Takes primary space */}
-          <div className="flex-1 relative flex flex-wrap items-center justify-center gap-4 rounded-lg overflow-hidden group bg-gray-800 p-2">
+        <div className="relative flex-1 flex flex-col md:flex-row p-4 bg-gray-900 overflow-hidden">
+          {/* Main video area (remote videos) - Takes primary space or half-width */}
+          <div
+            className={`flex-1 relative flex flex-wrap items-center justify-center gap-4 rounded-lg overflow-hidden group bg-gray-800 p-2
+                       ${
+                         showMidiVisualizer
+                           ? 'md:w-1/2 md:flex-shrink-0'
+                           : 'md:w-full'
+                       }`}
+          >
             {/* Background blur effect (optional, can be removed if not desired) */}
             <div className="absolute inset-0 w-full h-full bg-gray-800 filter blur-lg scale-110"></div>
 
@@ -716,10 +725,17 @@ const App = () => {
               remoteVideos.map(({ id, stream, videoActive }) => (
                 <div
                   key={id}
-                  // This class handles the proportion for remote videos.
+                  // These classes control the proportion for remote videos.
                   // For a consistent aspect ratio, 'aspect-video' (16:9) is generally good.
                   // The flex-grow/shrink with w-full/h-full help them fill available space.
-                  className="relative w-full h-full sm:w-1/2 lg:w-1/3 xl:w-1/4 max-w-full max-h-full flex-grow flex-shrink z-10 aspect-video rounded-lg overflow-hidden"
+                  // On small screens, they are responsive (w-full, h-full).
+                  // On medium and larger screens, they adapt to the available space in the flex container.
+                  className={`relative w-full h-full flex-grow flex-shrink z-10 aspect-video rounded-lg overflow-hidden
+                              ${
+                                showMidiVisualizer
+                                  ? 'md:w-1/2 md:h-1/2 lg:w-1/3 lg:h-1/2 xl:w-1/4 xl:h-1/2'
+                                  : 'sm:w-1/2 lg:w-1/3 xl:w-1/4 max-w-full max-h-full'
+                              }`}
                 >
                   <Video
                     stream={stream}
@@ -739,14 +755,31 @@ const App = () => {
             )}
           </div>
 
+          {/* NEW: MIDI Visualizer - Conditionally rendered, takes half width on md and up */}
+          {showMidiVisualizer && (
+            <div
+              className="mt-2 md:mt-0 md:ml-4 flex-shrink-0 bg-gray-800 bg-opacity-70 rounded-lg pt-2
+                            h-1/3 md:h-auto md:w-1/2"
+            >
+              {' '}
+              {/* Responsive height for mobile, half width for desktop */}
+              <MidiVisualizer
+                socket={socket}
+                roomId={roomId}
+                localUserId={socket?.id}
+              />
+            </div>
+          )}
+
           {/* Local video preview - Positioned dynamically */}
           {localStream && (
             <div
-              className={`absolute ${localVideoPositionClass}
+              className={`absolute 
                            w-40 h-30
                            md:w-60 md:h-40
                            lg:w-72 lg:h-48
-                           rounded-lg overflow-hidden z-20 m-4 shadow-xl border-2 border-indigo-500`}
+                           rounded-lg overflow-hidden z-20 m-4 shadow-xl border-2 border-indigo-500
+                           ${localVideoPositionClass}`}
             >
               <video
                 style={{ transform: 'scaleX(-1)' }} // Mirror local video
@@ -777,24 +810,12 @@ const App = () => {
               </p>
             </div>
           )}
-
-          {/* NEW: MIDI Visualizer - Placed below the main video area, conditionally rendered */}
-          {showMidiVisualizer && (
-            // This container now defines the height and background for the visualizer
-            <div className="mt-4 flex-shrink-0 bg-gray-800 bg-opacity-70 rounded-lg p-2 h-1/4">
-              <MidiVisualizer
-                socket={socket}
-                roomId={roomId}
-                localUserId={socket?.id}
-              />
-            </div>
-          )}
         </div>
       )}
 
       {/* Control bar at the bottom */}
       {joined && (
-        <div className="mx-4 rounded-t-l bg-gray-800 p-3 flex justify-center items-center z-30">
+        <div className="mx-4 rounded-b-lg bg-gray-800 p-3 flex justify-center items-center z-30">
           <div className="flex-1 flex items-center justify-start gap-2 pl-3 text-gray-300">
             <p className="text-sm">
               Room ID :{' '}
