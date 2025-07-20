@@ -604,19 +604,22 @@ const App = () => {
   const toggleVideo = () => {
     if (localStreamRef.current) {
       const videoTracks = localStreamRef.current.getVideoTracks();
-      if (videoTracks.length === 0) return; // No video track to toggle
-
       const newVideoState = !isVideoEnabled;
-
-      // CORRECT WAY: Simply enable or disable the track.
-      // WebRTC automatically handles stopping/resuming the video data flow.
       videoTracks.forEach((track) => {
         track.enabled = newVideoState;
       });
+      setIsVideoEnabled(newVideoState);
 
-      setIsVideoEnabled(newVideoState); // Update local UI state
+      // Replace video track in all peer connections
+      Object.values(peersRef.current).forEach((peer) => {
+        const sender = peer
+          .getSenders()
+          .find((s) => s.track && s.track.kind === 'video');
+        if (sender && videoTracks[0]) {
+          sender.replaceTrack(videoTracks[0]);
+        }
+      });
 
-      // Notify other peers about the state change.
       if (socket && joined) {
         socket.emit('videoStateChange', { videoEnabled: newVideoState });
       }
@@ -720,11 +723,11 @@ const App = () => {
           {/* Main video area (remote videos) - Takes primary space or half-width */}
           <div
             className={`flex-1 relative flex flex-wrap items-center justify-center gap-4 rounded-lg overflow-hidden group bg-gray-800 p-2
-                                ${
-                                  showMidiVisualizer
-                                    ? 'md:w-1/2 md:flex-shrink-0'
-                                    : 'md:w-full'
-                                }`}
+                       ${
+                         showMidiVisualizer
+                           ? 'md:w-1/2 md:flex-shrink-0'
+                           : 'md:w-full'
+                       }`}
           >
             {/* Background blur effect (optional, can be removed if not desired) */}
             <div className="absolute inset-0 w-full h-full bg-gray-800 filter blur-lg scale-110"></div>
@@ -740,11 +743,11 @@ const App = () => {
                   // On small screens, they are responsive (w-full, h-full).
                   // On medium and larger screens, they adapt to the available space in the flex container.
                   className={`relative w-full h-full flex-grow flex-shrink z-10 aspect-video rounded-lg overflow-hidden
-                                      ${
-                                        showMidiVisualizer
-                                          ? 'md:w-1/2 md:h-1/2 lg:w-1/3 lg:h-1/2 xl:w-1/4 xl:h-1/2'
-                                          : 'sm:w-1/2 lg:w-1/3 xl:w-1/4 max-w-full max-h-full'
-                                      }`}
+                              ${
+                                showMidiVisualizer
+                                  ? 'md:w-1/2 md:h-1/2 lg:w-1/3 lg:h-1/2 xl:w-1/4 xl:h-1/2'
+                                  : 'sm:w-1/2 lg:w-1/3 xl:w-1/4 max-w-full max-h-full'
+                              }`}
                 >
                   <Video
                     stream={stream}
@@ -768,7 +771,7 @@ const App = () => {
           {showMidiVisualizer && (
             <div
               className="mt-2 md:mt-0 md:ml-4 flex-shrink-0 bg-gray-800 bg-opacity-70 rounded-lg pt-2
-                                  h-1/3 md:h-auto md:w-1/2"
+                            h-1/3 md:h-auto md:w-1/2"
             >
               {' '}
               {/* Responsive height for mobile, half width for desktop */}
@@ -784,11 +787,11 @@ const App = () => {
           {localStream && (
             <div
               className={`absolute 
-                                  w-40 h-30
-                                  md:w-60 md:h-40
-                                  lg:w-72 lg:h-48
-                                  rounded-lg overflow-hidden z-20 m-4 shadow-xl border-2 border-indigo-500
-                                  ${localVideoPositionClass}`}
+                           w-40 h-30
+                           md:w-60 md:h-40
+                           lg:w-72 lg:h-48
+                           rounded-lg overflow-hidden z-20 m-4 shadow-xl border-2 border-indigo-500
+                           ${localVideoPositionClass}`}
             >
               <video
                 style={{ transform: 'scaleX(-1)' }} // Mirror local video
