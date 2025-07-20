@@ -273,6 +273,9 @@ const App = () => {
       console.log('Room successfully created acknowledgment:', roomId);
       setIsCreator(true); // Set creator flag
     });
+    socket.on('room-full', () => {
+      setError('Room is full. Only two participants are allowed.');
+    });
 
     // Cleanup function: unregister all Socket.IO event listeners on unmount or socket change
     return () => {
@@ -286,6 +289,7 @@ const App = () => {
       socket.off('user-disconnected', handleUserDisconnected);
       socket.off('room-not-found');
       socket.off('room-created');
+      socket.off('room-full');
     };
   }, [socket]); // Re-run this effect when the socket instance changes
 
@@ -560,9 +564,8 @@ const App = () => {
     Object.values(peersRef.current).forEach((peer) => {
       if (peer) peer.close();
     });
-
-    // Reset all state variables
     peersRef.current = {};
+    // Reset all state variables
     setRemoteVideos([]);
     setJoined(false);
     setIsCreator(false);
@@ -601,13 +604,22 @@ const App = () => {
   const toggleVideo = () => {
     if (localStreamRef.current) {
       const videoTracks = localStreamRef.current.getVideoTracks();
-      videoTracks.forEach((track) => {
-        track.enabled = !track.enabled; // Toggle track's enabled state
-      });
       const newVideoState = !isVideoEnabled;
-      setIsVideoEnabled(newVideoState); // Update local UI state
+      videoTracks.forEach((track) => {
+        track.enabled = newVideoState;
+      });
+      setIsVideoEnabled(newVideoState);
 
-      // Emit video state change to the server so other users can update their UI
+      // Replace video track in all peer connections
+      Object.values(peersRef.current).forEach((peer) => {
+        const sender = peer
+          .getSenders()
+          .find((s) => s.track && s.track.kind === 'video');
+        if (sender && videoTracks[0]) {
+          sender.replaceTrack(videoTracks[0]);
+        }
+      });
+
       if (socket && joined) {
         socket.emit('videoStateChange', { videoEnabled: newVideoState });
       }
