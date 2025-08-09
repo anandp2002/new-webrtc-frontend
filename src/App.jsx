@@ -9,41 +9,58 @@ import {
   LogOut,
   Copy,
   Users,
-  Music, // Import Music icon for MIDI toggle
+  AlertCircle,
 } from 'lucide-react';
-import MidiVisualizer from './MidiVisualizer'; // Import the new MidiVisualizer component
 
 const App = () => {
-  // State variables for managing application logic and UI
-  const [socket, setSocket] = useState(null); // Socket.IO client instance
-  const [roomId, setRoomId] = useState(''); // Current room ID
-  const [joined, setJoined] = useState(false); // Flag to indicate if user has joined a room
-  const localVideoRef = useRef(null); // Ref for the local user's video element
-  const peersRef = useRef({}); // Stores RTCPeerConnection instances for each remote user
-  const localStreamRef = useRef(null); // Holds the local MediaStream object
-  const [remoteVideos, setRemoteVideos] = useState([]); // Array of remote video objects { id, stream, videoActive }
-  const [error, setError] = useState(''); // Stores error messages
-  const [localStream, setLocalStream] = useState(null); // Local MediaStream state
-  const [isMuted, setIsMuted] = useState(false); // Local user's audio mute state
-  const [isVideoEnabled, setIsVideoEnabled] = useState(true); // Local user's video enable state
-  const [roomUrl, setRoomUrl] = useState(''); // URL for sharing the room
-  const [isCopied, setIsCopied] = useState(false); // Flag for clipboard copy success message
-  const [isCreator, setIsCreator] = useState(false); // Flag to indicate if the user created the room
-  const [participantCount, setParticipantCount] = useState(1); // Number of participants in the room
-  const [showMidiVisualizer, setShowMidiVisualizer] = useState(false); // NEW: State for MIDI visualizer visibility
+  // State variables
+  const [socket, setSocket] = useState(null);
+  const [roomId, setRoomId] = useState('');
+  const [joined, setJoined] = useState(false);
+  const localVideoRef = useRef(null);
+  const peersRef = useRef({});
+  const localStreamRef = useRef(null);
+  const [remoteVideos, setRemoteVideos] = useState([]);
+  const [error, setError] = useState('');
+  const [localStream, setLocalStream] = useState(null);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isVideoEnabled, setIsVideoEnabled] = useState(true);
+  const [roomUrl, setRoomUrl] = useState('');
+  const [isCopied, setIsCopied] = useState(false);
+  const [isCreator, setIsCreator] = useState(false);
+  const [participantCount, setParticipantCount] = useState(1);
 
-  // Environment variables for backend URL and STUN/TURN servers
-  // Make sure to set these in your .env file (e.g., VITE_BASE_URL=http://localhost:5000)
+  // Environment variables
   const BASE_URL = import.meta.env.VITE_BASE_URL || 'http://localhost:5000';
   const STUN_TURN_SERVER =
     import.meta.env.VITE_STUN_TURN_SERVER || 'stun.l.google.com:19302';
   const TURN_USERNAME = import.meta.env.VITE_TURN_USERNAME || '';
   const TURN_PASSWORD = import.meta.env.VITE_TURN_PASSWORD || '';
 
-  /**
-   * Fetches the local media stream (camera and microphone).
-   * @returns {MediaStream|null} The media stream or null if an error occurs.
-   */
+  // Function to initialize socket connection
+  const initializeSocket = useCallback(() => {
+    if (socket) {
+      socket.disconnect();
+    }
+
+    const newSocket = io(BASE_URL);
+    setSocket(newSocket);
+
+    newSocket.on('connect_error', (err) => {
+      console.error('Socket connection error:', err);
+      setError(
+        'Failed to connect to the server. Please check if the server is running.'
+      );
+    });
+
+    newSocket.on('connect', () => {
+      console.log('Connected to server with ID:', newSocket.id);
+      setError('');
+    });
+
+    return newSocket;
+  }, [BASE_URL]);
+
   const getMediaStream = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -51,10 +68,9 @@ const App = () => {
         audio: true,
       });
       console.log('Got media stream:', stream);
-      localStreamRef.current = stream; // Store in ref for consistent access
-      setLocalStream(stream); // Store in state to trigger re-renders
+      localStreamRef.current = stream;
+      setLocalStream(stream);
 
-      // Initialize local video and audio states based on the obtained stream
       setIsVideoEnabled(
         stream.getVideoTracks().length > 0 && stream.getVideoTracks()[0].enabled
       );
@@ -71,74 +87,45 @@ const App = () => {
     }
   }, []);
 
-  // Effect to set the local video element's srcObject when localStream changes
   useEffect(() => {
     if (localVideoRef.current && localStream) {
       localVideoRef.current.srcObject = localStream;
     }
   }, [localStream]);
 
-  // Effect to initialize Socket.IO connection and handle basic connection errors
+  // Initialize socket on component mount
   useEffect(() => {
-    const newSocket = io(BASE_URL);
-    setSocket(newSocket);
+    initializeSocket();
 
-    newSocket.on('connect_error', (err) => {
-      console.error('Socket connection error:', err);
-      setError(
-        'Failed to connect to the server. Please check if the server is running.'
-      );
-    });
-
-    newSocket.on('connect', () => {
-      console.log('Connected to server with ID:', newSocket.id);
-      setError(''); // Clear any previous connection errors
-    });
-
-    // Cleanup function: stop local media tracks and disconnect socket on component unmount
     return () => {
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((track) => track.stop());
       }
-      newSocket.disconnect();
     };
-  }, [BASE_URL]); // Re-run if BASE_URL changes
+  }, [initializeSocket]);
 
-  // Effect to handle Socket.IO events once the socket is established
   useEffect(() => {
     if (!socket) return;
 
-    /**
-     * Handles the 'all-users' event, setting up RTCPeerConnections for existing users.
-     * @param {string[]} users - Array of user IDs already in the room.
-     */
     const handleAllUsers = (users) => {
       console.log('Received all users:', users);
-      setParticipantCount(users.length + 1); // +1 for the local user
+      setParticipantCount(users.length + 1);
       users.forEach((userId) => {
-        // Create a new peer connection for each existing user and send an offer
         const peer = createPeer(userId, socket.id, localStreamRef.current);
         peersRef.current[userId] = peer;
       });
     };
 
-    /**
-     * Handles the 'initial-video-states' event, updating remote video active states.
-     * This is crucial for new users joining to know the initial video status of others.
-     * @param {object} videoStates - Object mapping userId to their videoEnabled boolean.
-     */
     const handleInitialVideoStates = (videoStates) => {
       console.log('Received initial video states:', videoStates);
       setRemoteVideos((prevRemoteVideos) => {
         const updatedVideos = prevRemoteVideos.map((video) => {
-          // If a remote video already exists, update its videoActive status
           if (Object.prototype.hasOwnProperty.call(videoStates, video.id)) {
             return { ...video, videoActive: videoStates[video.id] };
           }
           return video;
         });
 
-        // Add new entries for users whose streams haven't arrived yet but have video states
         const newUsersWithStates = Object.keys(videoStates).filter(
           (userId) => !prevRemoteVideos.some((v) => v.id === userId)
         );
@@ -147,36 +134,39 @@ const App = () => {
           ...updatedVideos,
           ...newUsersWithStates.map((userId) => ({
             id: userId,
-            stream: null, // Stream will be added later by ontrack event
+            stream: null,
             videoActive: videoStates[userId],
+            audioActive: true,
           })),
         ];
       });
     };
 
-    /**
-     * Handles the 'user-joined' event, adding a new peer for the joining user.
-     * @param {string} userId - The ID of the user who just joined.
-     */
+    const handleInitialAudioStates = (audioStates) => {
+      console.log('Received initial audio states:', audioStates);
+      setRemoteVideos((prevRemoteVideos) => {
+        return prevRemoteVideos.map((video) => {
+          if (Object.prototype.hasOwnProperty.call(audioStates, video.id)) {
+            return { ...video, audioActive: audioStates[video.id] };
+          }
+          return video;
+        });
+      });
+    };
+
     const handleUserJoined = (userId) => {
       console.log('User joined:', userId);
-      if (userId === socket.id) return; // Don't process self
+      if (userId === socket.id) return;
       setParticipantCount((prev) => prev + 1);
-      // Add a new peer connection for the joining user and await their offer
       const peer = addPeer(userId, socket.id, localStreamRef.current);
       peersRef.current[userId] = peer;
     };
 
-    /**
-     * Handles the 'offer' event, setting remote description and sending an answer.
-     * @param {object} payload - Contains sdp (Session Description Protocol) and caller ID.
-     */
     const handleOffer = async ({ sdp, caller }) => {
       console.log('Received offer from:', caller);
       try {
         let peer = peersRef.current[caller];
         if (!peer) {
-          // If peer doesn't exist, create it (this can happen if offer arrives before 'all-users' for some reason)
           peer = addPeer(caller, socket.id, localStreamRef.current);
           peersRef.current[caller] = peer;
         }
@@ -189,10 +179,6 @@ const App = () => {
       }
     };
 
-    /**
-     * Handles the 'answer' event, setting remote description for the peer.
-     * @param {object} payload - Contains sdp (Session Description Protocol) and caller ID.
-     */
     const handleAnswer = async ({ sdp, caller }) => {
       console.log('Received answer from:', caller);
       try {
@@ -205,10 +191,6 @@ const App = () => {
       }
     };
 
-    /**
-     * Handles the 'ice-candidate' event, adding the ICE candidate to the peer connection.
-     * @param {object} payload - Contains candidate and the sender's ID.
-     */
     const handleIceCandidate = async ({ from, candidate }) => {
       try {
         const peer = peersRef.current[from];
@@ -220,10 +202,6 @@ const App = () => {
       }
     };
 
-    /**
-     * Handles the 'remoteVideoStateChange' event, updating a remote user's video status.
-     * @param {object} payload - Contains userId and videoEnabled boolean.
-     */
     const handleRemoteVideoStateChange = ({ userId, videoEnabled }) => {
       console.log(
         `Remote user ${userId} video state changed to: ${videoEnabled}`
@@ -235,114 +213,131 @@ const App = () => {
       );
     };
 
-    /**
-     * Handles the 'user-disconnected' event, cleaning up peer connection and remote video.
-     * @param {string} userId - The ID of the user who disconnected.
-     */
+    const handleRemoteAudioStateChange = ({ userId, audioEnabled }) => {
+      console.log(
+        `Remote user ${userId} audio state changed to: ${audioEnabled}`
+      );
+      setRemoteVideos((prev) =>
+        prev.map((v) =>
+          v.id === userId ? { ...v, audioActive: audioEnabled } : v
+        )
+      );
+    };
+
     const handleUserDisconnected = (userId) => {
       console.log('User disconnected:', userId);
       if (peersRef.current[userId]) {
-        peersRef.current[userId].close(); // Close the RTCPeerConnection
-        delete peersRef.current[userId]; // Remove from peers reference
-        setRemoteVideos((prev) => prev.filter((v) => v.id !== userId)); // Remove remote video from state
-        setParticipantCount((prev) => Math.max(1, prev - 1)); // Decrement participant count
+        peersRef.current[userId].close();
+        delete peersRef.current[userId];
+        setRemoteVideos((prev) => prev.filter((v) => v.id !== userId));
+        setParticipantCount((prev) => Math.max(1, prev - 1));
       }
     };
 
-    /**
-     * Handles the 'room-not-found' event, displaying an error and leaving the room.
-     */
     const handleRoomNotFound = () => {
       setError(
         'This room does not exist. Please check the Room ID or create a new room.'
       );
-      leaveRoom(); // Clean up local state
     };
 
-    // Register all Socket.IO event listeners
+    const handleRoomFull = ({
+      message,
+      currentParticipants,
+      maxParticipants,
+    }) => {
+      console.log('Room is full:', message);
+      setError(
+        `Room is full! Currently ${currentParticipants}/${maxParticipants} participants. Please try joining a different room or create a new one.`
+      );
+    };
+
+    // Register event listeners
     socket.on('all-users', handleAllUsers);
     socket.on('initial-video-states', handleInitialVideoStates);
+    socket.on('initial-audio-states', handleInitialAudioStates);
     socket.on('user-joined', handleUserJoined);
     socket.on('offer', handleOffer);
     socket.on('answer', handleAnswer);
     socket.on('ice-candidate', handleIceCandidate);
     socket.on('remoteVideoStateChange', handleRemoteVideoStateChange);
+    socket.on('remoteAudioStateChange', handleRemoteAudioStateChange);
     socket.on('user-disconnected', handleUserDisconnected);
     socket.on('room-not-found', handleRoomNotFound);
+    socket.on('room-full', handleRoomFull);
     socket.on('room-created', ({ roomId }) => {
       console.log('Room successfully created acknowledgment:', roomId);
-      setIsCreator(true); // Set creator flag
-    });
-    socket.on('room-full', () => {
-      setError('Room is full. Only two participants are allowed.');
+      setIsCreator(true);
     });
 
-    // Cleanup function: unregister all Socket.IO event listeners on unmount or socket change
     return () => {
       socket.off('all-users', handleAllUsers);
       socket.off('initial-video-states', handleInitialVideoStates);
+      socket.off('initial-audio-states', handleInitialAudioStates);
       socket.off('user-joined', handleUserJoined);
       socket.off('offer', handleOffer);
       socket.off('answer', handleAnswer);
       socket.off('ice-candidate', handleIceCandidate);
       socket.off('remoteVideoStateChange', handleRemoteVideoStateChange);
+      socket.off('remoteAudioStateChange', handleRemoteAudioStateChange);
       socket.off('user-disconnected', handleUserDisconnected);
       socket.off('room-not-found');
-      socket.off('room-created');
       socket.off('room-full');
+      socket.off('room-created');
     };
-  }, [socket]); // Re-run this effect when the socket instance changes
+  }, [socket]);
 
-  /**
-   * Creates a new room and automatically joins it.
-   */
   const createRoom = async () => {
-    if (!socket) return;
+    // Ensure we have a fresh socket connection
+    if (!socket || !socket.connected) {
+      const newSocket = initializeSocket();
+      // Wait for connection before proceeding
+      await new Promise((resolve) => {
+        newSocket.on('connect', resolve);
+      });
+    }
+
     setError('');
-    // Generate a random 6-digit room ID
     const newRoomId = Math.floor(100000 + Math.random() * 900000).toString();
 
     setRoomId(newRoomId);
     console.log('Requesting to create room with ID:', newRoomId);
 
-    // Construct the full room URL for sharing
     const url = `${window.location.origin}?room=${newRoomId}`;
     setRoomUrl(url);
 
-    // Emit 'create-room' event to the server
     socket.emit('create-room', { roomId: newRoomId });
-
-    // Automatically join the newly created room
     await joinRoom(newRoomId);
 
-    // Copy room URL to clipboard
     navigator.clipboard
       .writeText(url)
       .then(() => {
         console.log('Room URL copied to clipboard');
         setIsCopied(true);
-        setTimeout(() => setIsCopied(false), 3000); // Show "Copied!" for 3 seconds
+        setTimeout(() => setIsCopied(false), 3000);
       })
       .catch((err) => console.error('Could not copy room URL:', err));
   };
 
-  /**
-   * Joins an existing room.
-   * @param {string} [idToJoin=roomId] - The room ID to join. Defaults to the current roomId state.
-   */
   const joinRoom = async (idToJoin = roomId) => {
-    if (!idToJoin || !socket) {
+    if (!idToJoin) {
       setError('Please enter a Room ID');
       return;
+    }
+
+    // Ensure we have a fresh socket connection
+    if (!socket || !socket.connected) {
+      const newSocket = initializeSocket();
+      // Wait for connection before proceeding
+      await new Promise((resolve) => {
+        newSocket.on('connect', resolve);
+      });
     }
 
     setError('');
     console.log('Attempting to join room:', idToJoin);
 
-    // First, check if the room exists on the server
     socket.emit('check-room', { roomId: idToJoin });
 
-    // Wait for the server's response on room existence
     const roomExistsPromise = new Promise((resolve) => {
       socket.once('room-exists', ({ exists }) => {
         resolve(exists);
@@ -358,7 +353,6 @@ const App = () => {
       return;
     }
 
-    // Get local media stream before joining
     const stream = await getMediaStream();
     if (!stream) {
       setError(
@@ -367,13 +361,11 @@ const App = () => {
       return;
     }
 
-    // Emit 'join-room' event to the server
     socket.emit('join-room', { roomId: idToJoin });
-    setJoined(true); // Set joined state to true
+    setJoined(true);
     console.log('Successfully joined room:', idToJoin);
   };
 
-  // Effect to read room ID from URL parameters on component mount
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const roomFromUrl = params.get('room');
@@ -382,17 +374,8 @@ const App = () => {
     }
   }, []);
 
-  /**
-   * Creates a new RTCPeerConnection and sets up event listeners for WebRTC signaling.
-   * This function is used when initiating a connection (e.g., when a new user joins and sends an offer).
-   * @param {string} userId - The ID of the remote user to connect with.
-   * @param {string} callerId - The ID of the local user (the caller).
-   * @param {MediaStream} stream - The local media stream to add to the peer connection.
-   * @returns {RTCPeerConnection} The configured RTCPeerConnection instance.
-   */
   const createPeer = (userId, callerId, stream) => {
     console.log('Creating peer for user:', userId);
-    // Configure ICE servers, including STUN and optional TURN
     const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
     if (TURN_USERNAME && TURN_PASSWORD && STUN_TURN_SERVER) {
       iceServers.push({
@@ -404,7 +387,6 @@ const App = () => {
 
     const peer = new RTCPeerConnection({ iceServers });
 
-    // Add local media tracks to the peer connection
     if (stream) {
       stream.getTracks().forEach((track) => peer.addTrack(track, stream));
     } else {
@@ -413,7 +395,6 @@ const App = () => {
       );
     }
 
-    // Event listener for ICE candidates (network information)
     peer.onicecandidate = (event) => {
       if (event.candidate) {
         socket.emit('ice-candidate', {
@@ -423,41 +404,43 @@ const App = () => {
       }
     };
 
-    // Event listener for ICE connection state changes (for debugging)
     peer.oniceconnectionstatechange = () => {
       console.log(
         `ICE connection state with ${userId}: ${peer.iceConnectionState}`
       );
     };
 
-    // Event listener for when remote tracks are received
     peer.ontrack = ({ streams }) => {
       console.log('Received tracks from:', userId);
       setRemoteVideos((prev) => {
         const exists = prev.find((v) => v.id === userId);
         if (exists) {
-          // If remote video entry already exists, update its stream and preserve videoActive status
           return prev.map((v) =>
             v.id === userId
               ? {
                   ...v,
                   stream: streams[0],
                   videoActive:
-                    v.videoActive !== undefined ? v.videoActive : true, // Preserve existing or default to true
+                    v.videoActive !== undefined ? v.videoActive : true,
+                  audioActive:
+                    v.audioActive !== undefined ? v.audioActive : true,
                 }
               : v
           );
         } else {
-          // Add a new entry for the remote video, defaulting videoActive to true
           return [
             ...prev,
-            { id: userId, stream: streams[0], videoActive: true },
+            {
+              id: userId,
+              stream: streams[0],
+              videoActive: true,
+              audioActive: true,
+            },
           ];
         }
       });
     };
 
-    // Create and send an WebRTC offer
     peer
       .createOffer()
       .then((offer) => peer.setLocalDescription(offer))
@@ -476,15 +459,6 @@ const App = () => {
     return peer;
   };
 
-  /**
-   * Adds a new RTCPeerConnection and sets up event listeners for WebRTC signaling.
-   * This function is used when a remote user sends an offer to the local user.
-   * It's similar to `createPeer` but doesn't immediately create an offer.
-   * @param {string} userId - The ID of the remote user to connect with.
-   * @param {string} callerId - The ID of the local user (the answerer).
-   * @param {MediaStream} stream - The local media stream to add to the peer connection.
-   * @returns {RTCPeerConnection} The configured RTCPeerConnection instance.
-   */
   const addPeer = (userId, callerId, stream) => {
     console.log('Adding peer for user:', userId);
 
@@ -525,7 +499,6 @@ const App = () => {
       setRemoteVideos((prev) => {
         const exists = prev.find((v) => v.id === userId);
         if (exists) {
-          // If remote video entry already exists, update its stream and preserve videoActive status
           return prev.map((v) =>
             v.id === userId
               ? {
@@ -533,14 +506,20 @@ const App = () => {
                   stream: streams[0],
                   videoActive:
                     v.videoActive !== undefined ? v.videoActive : true,
+                  audioActive:
+                    v.audioActive !== undefined ? v.audioActive : true,
                 }
               : v
           );
         } else {
-          // Add a new entry for the remote video, defaulting videoActive to true
           return [
             ...prev,
-            { id: userId, stream: streams[0], videoActive: true },
+            {
+              id: userId,
+              stream: streams[0],
+              videoActive: true,
+              audioActive: true,
+            },
           ];
         }
       });
@@ -549,9 +528,6 @@ const App = () => {
     return peer;
   };
 
-  /**
-   * Cleans up all resources when leaving a room.
-   */
   const leaveRoom = () => {
     // Stop all local media tracks
     if (localStreamRef.current) {
@@ -565,6 +541,7 @@ const App = () => {
       if (peer) peer.close();
     });
     peersRef.current = {};
+
     // Reset all state variables
     setRemoteVideos([]);
     setJoined(false);
@@ -572,35 +549,36 @@ const App = () => {
     setRoomId('');
     setRoomUrl('');
     setError('');
-    setParticipantCount(1); // Reset participant count
-    setShowMidiVisualizer(false); // NEW: Reset MIDI visualizer state
+    setParticipantCount(1);
 
-    // Disconnect socket (this will also trigger server-side cleanup)
-    if (socket) {
+    // Don't disconnect socket, just leave the room on the server side
+    if (socket && socket.connected) {
       socket.disconnect();
-      setSocket(null); // Clear socket state
     }
-    console.log('Left room.');
+
+    // Initialize a fresh socket connection for future use
+    setTimeout(() => {
+      initializeSocket();
+    }, 100);
+
+    console.log('Left room and reset for new connection.');
   };
 
-  /**
-   * Toggles the local user's microphone mute state.
-   */
   const toggleMute = () => {
     if (localStreamRef.current) {
       const audioTracks = localStreamRef.current.getAudioTracks();
+      const newMuteState = !isMuted;
       audioTracks.forEach((track) => {
-        track.enabled = !track.enabled; // Toggle track's enabled state
+        track.enabled = !newMuteState;
       });
-      setIsMuted(!isMuted); // Update local UI state
-      // No socket emission for mute/unmute if you only want to update local UI.
-      // If you want to show mute status for remote users, you'd emit a 'muteStateChange' event.
+      setIsMuted(newMuteState);
+
+      if (socket && joined) {
+        socket.emit('audioStateChange', { audioEnabled: !newMuteState });
+      }
     }
   };
 
-  /**
-   * Toggles the local user's video enable state and emits the change to the server.
-   */
   const toggleVideo = () => {
     if (localStreamRef.current) {
       const videoTracks = localStreamRef.current.getVideoTracks();
@@ -610,7 +588,6 @@ const App = () => {
       });
       setIsVideoEnabled(newVideoState);
 
-      // Replace video track in all peer connections
       Object.values(peersRef.current).forEach((peer) => {
         const sender = peer
           .getSenders()
@@ -626,27 +603,20 @@ const App = () => {
     }
   };
 
-  /**
-   * Copies the room URL to the clipboard.
-   */
   const copyRoomUrl = () => {
     navigator.clipboard.writeText(roomUrl).then(() => {
       setIsCopied(true);
-      setTimeout(() => setIsCopied(false), 3000); // Show "Copied!" for 3 seconds
+      setTimeout(() => setIsCopied(false), 3000);
     });
   };
 
-  // Determine local video position class dynamically
-  // When MIDI is shown, it's on the right of the remote video area, which is now half the screen.
-  // So, calc(50% + 1rem) pushes it beyond the left half to be within the right side of the left half.
-  const localVideoPositionClass = showMidiVisualizer
-    ? 'top-4 right-4 md:right-[calc(50%+1rem)]' // Adjusted to be on the right side of the left half (remote videos)
-    : 'bottom-4 right-4'; // Bottom-right when MIDI visualizer is hidden
+  const clearError = () => {
+    setError('');
+  };
 
   return (
     <div className="flex flex-col h-screen bg-gray-900 text-white font-sans">
       {!joined ? (
-        // Room entry screen
         <div className="flex-1 flex items-center justify-center p-4">
           <div className="w-full max-w-md bg-gray-800 shadow-2xl rounded-xl p-6">
             <div className="flex flex-col items-center gap-6">
@@ -655,12 +625,26 @@ const App = () => {
               </h1>
               <p className="text-gray-400 text-center max-w-md">
                 Connect with others through secure, high-quality video calls.
-                Create a room or join with a room ID.
+                Create a room or join with a room ID. (Max 2 participants per
+                room)
               </p>
 
               {error && (
                 <div className="bg-red-900 border border-red-700 text-red-300 px-4 py-3 rounded-lg relative w-full max-w-md">
-                  {error}
+                  <div className="flex items-start gap-3">
+                    <AlertCircle size={20} className="flex-shrink-0 mt-0.5" />
+                    <div className="flex-1">
+                      <p className="font-medium mb-1">Unable to join room</p>
+                      <p className="text-sm">{error}</p>
+                    </div>
+                    <button
+                      onClick={clearError}
+                      className="text-red-300 hover:text-red-100 ml-2"
+                      aria-label="Close error"
+                    >
+                      ✕
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -669,7 +653,7 @@ const App = () => {
                   onClick={createRoom}
                   className="bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white px-6 py-3 rounded-lg transition duration-300 w-full font-medium shadow-md flex items-center justify-center gap-2"
                 >
-                  <UserPlus size={20} /> Create Room
+                  <UserPlus size={20} /> Create New Room
                 </button>
 
                 {roomUrl && (
@@ -718,42 +702,23 @@ const App = () => {
           </div>
         </div>
       ) : (
-        // Video chat room screen
-        <div className="relative flex-1 flex flex-col md:flex-row p-4 bg-gray-900 overflow-hidden">
-          {/* Main video area (remote videos) - Takes primary space or half-width */}
-          <div
-            className={`flex-1 relative flex flex-wrap items-center justify-center gap-4 rounded-lg overflow-hidden group bg-gray-800 p-2
-                       ${
-                         showMidiVisualizer
-                           ? 'md:w-1/2 md:flex-shrink-0'
-                           : 'md:w-full'
-                       }`}
-          >
-            {/* Background blur effect (optional, can be removed if not desired) */}
+        <div className="relative flex-1 flex flex-col p-4 bg-gray-900 overflow-hidden">
+          {/* Main video area - full width */}
+          <div className="flex-1 relative flex flex-wrap items-center justify-center gap-4 rounded-lg overflow-hidden group bg-gray-800 p-2">
             <div className="absolute inset-0 w-full h-full bg-gray-800 filter blur-lg scale-110"></div>
 
-            {/* Render remote videos */}
             {remoteVideos.length > 0 ? (
-              remoteVideos.map(({ id, stream, videoActive }) => (
+              remoteVideos.map(({ id, stream, videoActive, audioActive }) => (
                 <div
                   key={id}
-                  // These classes control the proportion for remote videos.
-                  // For a consistent aspect ratio, 'aspect-video' (16:9) is generally good.
-                  // The flex-grow/shrink with w-full/h-full help them fill available space.
-                  // On small screens, they are responsive (w-full, h-full).
-                  // On medium and larger screens, they adapt to the available space in the flex container.
-                  className={`relative w-full h-full flex-grow flex-shrink z-10 aspect-video rounded-lg overflow-hidden
-                              ${
-                                showMidiVisualizer
-                                  ? 'md:w-1/2 md:h-1/2 lg:w-1/3 lg:h-1/2 xl:w-1/4 xl:h-1/2'
-                                  : 'sm:w-1/2 lg:w-1/3 xl:w-1/4 max-w-full max-h-full'
-                              }`}
+                  className="relative w-full h-full flex-grow flex-shrink z-10 aspect-video rounded-lg overflow-hidden sm:w-1/2 lg:w-1/3 xl:w-1/4 max-w-full max-h-full"
                 >
                   <Video
                     stream={stream}
                     userId={id}
-                    mirror={true} // Remote videos are typically mirrored for a natural feel
+                    mirror={true}
                     videoActive={videoActive}
+                    audioActive={audioActive}
                   />
                   <p className="absolute bottom-4 left-4 text-white text-base font-medium bg-black bg-opacity-50 px-3 py-1 rounded-md z-20">
                     {id.substring(0, 6)}...
@@ -762,49 +727,31 @@ const App = () => {
               ))
             ) : (
               <div className="relative flex items-center justify-center w-full h-full text-gray-500 text-2xl z-10">
-                Waiting for others to join...
+                <div className="text-center">
+                  <Users size={48} className="mx-auto mb-4 opacity-50" />
+                  <p>Waiting for others to join...</p>
+                  <p className="text-lg mt-2">
+                    Room capacity: {participantCount}/2
+                  </p>
+                </div>
               </div>
             )}
           </div>
 
-          {/* NEW: MIDI Visualizer - Conditionally rendered, takes half width on md and up */}
-          {showMidiVisualizer && (
-            <div
-              className="mt-2 md:mt-0 md:ml-4 flex-shrink-0 bg-gray-800 bg-opacity-70 rounded-lg pt-2
-                            h-1/3 md:h-auto md:w-1/2"
-            >
-              {' '}
-              {/* Responsive height for mobile, half width for desktop */}
-              <MidiVisualizer
-                socket={socket}
-                roomId={roomId}
-                localUserId={socket?.id}
-              />
-            </div>
-          )}
-
-          {/* Local video preview - Positioned dynamically */}
+          {/* Local video preview - always positioned at bottom-right */}
           {localStream && (
-            <div
-              className={`absolute 
-                           w-40 h-30
-                           md:w-60 md:h-40
-                           lg:w-72 lg:h-48
-                           rounded-lg overflow-hidden z-20 m-4 shadow-xl border-2 border-indigo-500
-                           ${localVideoPositionClass}`}
-            >
+            <div className="absolute bottom-4 right-4 w-40 h-30 md:w-60 md:h-40 lg:w-72 lg:h-48 rounded-lg overflow-hidden z-20 m-4 shadow-xl border-2 border-indigo-500">
               <video
-                style={{ transform: 'scaleX(-1)' }} // Mirror local video
+                style={{ transform: 'scaleX(-1)' }}
                 ref={localVideoRef}
                 autoPlay
                 playsInline
-                muted // Local video should be muted to prevent echo
+                muted
                 className={`relative w-full h-full object-cover z-10 transition-opacity duration-300 ${
                   isVideoEnabled ? 'opacity-100' : 'opacity-0'
                 }`}
               />
 
-              {/* Overlay for "Camera Off" state */}
               {!isVideoEnabled && (
                 <div className="absolute inset-0 flex items-center justify-center bg-gray-700 text-white z-20">
                   <div className="text-center">
@@ -820,23 +767,28 @@ const App = () => {
               <p className="absolute bottom-1 left-1 text-white text-xs font-medium bg-gray-800 bg-opacity-50 px-2 py-0.5 rounded-md z-20">
                 You
               </p>
+              {isMuted && (
+                <div className="absolute top-1 left-1">
+                  <div className="w-6 h-6 bg-red-600 rounded-full flex items-center justify-center">
+                    <MicOff size={12} className="text-white" />
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
       )}
 
-      {/* Control bar at the bottom */}
       {joined && (
         <div className="mx-4 rounded-b-lg bg-gray-800 p-3 flex justify-center items-center z-30">
           <div className="flex-1 flex items-center justify-start gap-2 pl-3 text-gray-300">
             <p className="text-sm">
-              Room ID :{' '}
+              Room ID:{' '}
               <span className="font-medium text-gray-300">{roomId}</span>
             </p>
           </div>
 
           <div className="flex items-center gap-4">
-            {/* Mute/Unmute button */}
             <button
               onClick={toggleMute}
               className={`p-3 rounded-full transition-colors duration-200 ease-in-out ${
@@ -848,7 +800,7 @@ const App = () => {
             >
               {isMuted ? <MicOff size={24} /> : <Mic size={24} />}
             </button>
-            {/* Video On/Off button */}
+
             <button
               onClick={toggleVideo}
               className={`p-3 rounded-full transition-colors duration-200 ease-in-out ${
@@ -864,23 +816,7 @@ const App = () => {
                 <VideoOff size={24} />
               )}
             </button>
-            {/* NEW: MIDI Visualizer Toggle Button */}
-            <button
-              onClick={() => setShowMidiVisualizer(!showMidiVisualizer)}
-              className={`p-3 rounded-full transition-colors duration-200 ease-in-out ${
-                showMidiVisualizer
-                  ? 'bg-indigo-500 text-white hover:bg-indigo-600'
-                  : 'bg-gray-700 hover:bg-gray-600 text-white'
-              }`}
-              title={
-                showMidiVisualizer
-                  ? 'Hide MIDI Visualizer'
-                  : 'Show MIDI Visualizer'
-              }
-            >
-              <Music size={24} />
-            </button>
-            {/* Leave room button */}
+
             <button
               onClick={leaveRoom}
               className="bg-red-600 hover:bg-red-700 text-white px-5 py-2.5 rounded-full transition-colors duration-300 font-medium shadow-md flex items-center gap-1.5 text-sm"
@@ -889,10 +825,9 @@ const App = () => {
             </button>
           </div>
 
-          {/* Participant count display */}
           <div className="flex-1 flex items-center justify-end gap-2 pr-3 text-gray-300">
             <Users size={24} />
-            <span className="text-lg font-medium">{participantCount}</span>
+            <span className="text-lg font-medium">{participantCount}/2</span>
           </div>
         </div>
       )}
@@ -900,28 +835,22 @@ const App = () => {
   );
 };
 
-/**
- * Video Component: Renders a video stream and an overlay when video is off.
- * @param {object} props - Component props.
- * @param {MediaStream} props.stream - The media stream to display.
- * @param {string} props.userId - The ID of the user associated with the stream.
- * @param {boolean} [props.mirror=false] - Whether to mirror the video horizontally.
- * @param {boolean} props.videoActive - Whether the video is currently active (true) or off (false).
- */
-const Video = ({ stream, userId, mirror = false, videoActive }) => {
+const Video = ({
+  stream,
+  userId,
+  mirror = false,
+  videoActive,
+  audioActive,
+}) => {
   const videoRef = useRef(null);
 
   useEffect(() => {
     if (videoRef.current && stream) {
       videoRef.current.srcObject = stream;
     } else if (videoRef.current && !stream) {
-      // If stream is null, clear srcObject to stop displaying previous stream
       videoRef.current.srcObject = null;
     }
-    // The videoActive prop directly controls the display,
-    // so no need to listen for 'mute'/'unmute' on the track itself for this component.
-    // The parent (App) component now manages this state via signaling.
-  }, [stream, userId, videoActive]); // Added videoActive to dependencies
+  }, [stream, userId, videoActive]);
 
   return (
     <div className="relative w-full h-full overflow-hidden rounded-lg shadow-lg bg-black group">
@@ -934,7 +863,6 @@ const Video = ({ stream, userId, mirror = false, videoActive }) => {
           videoActive ? 'opacity-100' : 'opacity-0'
         }`}
       />
-      {/* Overlay for "Camera Off" state */}
       {!videoActive && (
         <div className="absolute inset-0 flex items-center justify-center bg-gray-800 text-white z-20">
           <div className="text-center">
@@ -944,6 +872,14 @@ const Video = ({ stream, userId, mirror = false, videoActive }) => {
               </span>
             </div>
             <p className="text-sm">Camera Off</p>
+          </div>
+        </div>
+      )}
+      {/* Single mute indicator in top-right corner only */}
+      {!audioActive && videoActive && (
+        <div className="absolute top-2 right-2">
+          <div className="w-6 h-6 bg-red-600 rounded-full flex items-center justify-center">
+            <MicOff size={12} className="text-white" />
           </div>
         </div>
       )}
